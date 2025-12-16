@@ -66,14 +66,13 @@ class MoEMinimalLLM(nn.Module):
     def forward(self, x, return_aux_loss=True):
         # Token embeddings
         x = self.token_embedding(x) * math.sqrt(self.config.d_model)
-        if x.size(1) > 1:  
-            gate_input = x[:, :-1, :12]
-            gates = torch.sigmoid(self.smear_gate(gate_input))  
-            strength = self.smear_strength * gates 
-            smear_term = strength * x[:, 1:]
-            zeros = torch.zeros(x.size(0), 1, x.size(2), device=x.device, dtype=x.dtype)
-            smear_padded = torch.cat([smear_term, zeros], dim=1)
-            x = x + smear_padded
+        if x.size(1) > 1:
+            gate_input = x[:, 1:, :12].detach()
+            smear_gate_out = self.smear_strength * torch.sigmoid(self.smear_gate(gate_input))
+            x = torch.cat([
+                x[:, :1],                                         
+                x[:, 1:] + smear_gate_out * x[:, :-1].detach()    
+            ], dim=1)
         x = self.position_dropout(x)
 
         # Collect auxiliary losses from MoE layers
