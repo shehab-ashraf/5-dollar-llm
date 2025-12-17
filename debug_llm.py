@@ -8,12 +8,18 @@ from torch.utils.data import DataLoader
 # Fix tokenizer parallelism warning when using DataLoader workers
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-from configs.moe_config import DebugMoEConfig
+# On CPU with multiprocessing, torch.compile needs Python fallback to avoid C++ compiler issues
+if not torch.cuda.is_available():
+    os.environ["TORCH_INDUCTOR_SKIP_CPP_WRAPPER"] = "1"
+    # Suppress torch.compile errors on CPU and fall back to eager mode
+    torch._dynamo.config.suppress_errors = True
+
+from configs.llm_config import DebugMoEConfig
 from configs.dataset_config import DataConfig
 from training.trainer import train_moe_model
 from utils.helpers import set_seed
 from utils.logger import setup_logging
-from train_moe import prepare_datasets
+from train_llm import prepare_datasets
 
 def main():
     logger = setup_logging(log_dir="./logs_debug")
@@ -28,9 +34,11 @@ def main():
     config = DebugMoEConfig()
     
     print("Loading dataset with Hugging Face Datasets API...")
+    # For debug, we just want a small number of docs
+    num_docs = 100
     data_cfg = DataConfig(
         seq_length=config.max_seq_len,
-        num_samples=config.num_documents,
+        num_samples=num_docs,
         cache_dir="./hf_cache_debug",
     )
 
@@ -53,8 +61,8 @@ def main():
     )
     if device == "CPU":
         loader_args["pin_memory"] = False
-        loader_args["num_workers"] = 0 # Avoid multiprocessing issues on some setups or low resource
-
+        loader_args["num_workers"] = os.cpu_count() // 2 # Avoid multiprocessing issues on some setups or low resource
+        
     train_loader = DataLoader(train_ds, shuffle=True, **loader_args)
     val_loader = DataLoader(val_ds, shuffle=False, **loader_args)
 
