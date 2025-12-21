@@ -61,10 +61,12 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
 
     muon_optimizer = Muon(muon_params, lr=config.muon_lr, momentum=config.muon_momentum)
+    
     adamw_optimizer = torch.optim.AdamW(
         adamw_params,
         lr=config.adamw_lr,
-        weight_decay=config.weight_decay
+        weight_decay=config.weight_decay,
+        fused=torch.cuda.is_available() # Use fused Adam when on CUDA
     )
 
     return [muon_optimizer, adamw_optimizer]
@@ -161,28 +163,19 @@ def train_model(
             # Count tokens in this batch (approx: batch_size * seq_len)
             batch_tokens = x.numel()
 
-            # Forward pass
             if config.use_amp:
                 with autocast('cuda', dtype=torch.bfloat16):
-                    logits = model(x)
-                    shift_logits = logits[:, :-1, :].contiguous()
-                    shift_labels = y[:, 1:].contiguous()
-                    ce_loss = F.cross_entropy(
-                        shift_logits.view(-1, config.vocab_size),
-                        shift_labels.view(-1)
-                    )
+                    output = model(x, labels=y)
+                    ce_loss = output['loss']
+                    train_accuracy = output['accuracy']
 
                     total_loss = ce_loss
                     loss = total_loss / config.gradient_accumulation_steps
                 loss.backward()
             else:
-                logits = model(x)
-                shift_logits = logits[:, :-1, :].contiguous()
-                shift_labels = y[:, 1:].contiguous()
-                ce_loss = F.cross_entropy(
-                    shift_logits.view(-1, config.vocab_size),
-                    shift_labels.view(-1)
-                )
+                output = model(x, labels=y)
+                ce_loss = output['loss']
+                train_accuracy = output['accuracy']
 
                 total_loss = ce_loss
                 loss = total_loss / config.gradient_accumulation_steps
@@ -215,8 +208,7 @@ def train_model(
             # Logging
             if step % log_every == 0 or stopped_early:
                 with torch.no_grad():
-                    predictions = logits.argmax(dim=-1)
-                    accuracy = (predictions == y).float().mean().item()
+                    accuracy = train_accuracy.item()
                     perplexity = math.exp(min(current_loss, 20))
                     current_lr = schedulers[0].get_last_lr()[0] if schedulers else optimizers[0].param_groups[0]['lr']
 
@@ -443,21 +435,14 @@ def warmup_compiled_kernels(
         else:
             x, y = batch[0].to(device), batch[-1].to(device)
         
-        # Forward + Backward
         if config.use_amp:
             with autocast('cuda', dtype=torch.bfloat16):
-                logits = model(x)
-                loss = F.cross_entropy(
-                    logits[:, :-1, :].reshape(-1, config.vocab_size),
-                    y[:, 1:].reshape(-1)
-                )
+                output = model(x, labels=y)
+                loss = output['loss']
             loss.backward()
         else:
-            logits = model(x)
-            loss = F.cross_entropy(
-                logits[:, :-1, :].reshape(-1, config.vocab_size),
-                y[:, 1:].reshape(-1)
-            )
+            output = model(x, labels=y)
+            loss = output['loss']
             loss.backward()
         
         # Optimizer step (warms up optimizer kernels)
